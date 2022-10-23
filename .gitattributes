@@ -51,3 +51,4 @@ saved_model/**/* filter=lfs diff=lfs merge=lfs -text
 *.jpg filter=lfs diff=lfs merge=lfs -text
 *.jpeg filter=lfs diff=lfs merge=lfs -text
 *.webp filter=lfs diff=lfs merge=lfs -text
+CMeEE-V2_train.json filter=lfs diff=lfs merge=lfs -text
