@@ -2,7 +2,7 @@ import torch
 import math
 import copy
 from torch import nn
-device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 class Embeddings(nn.Module):
     def __init__(self, d_model, d_vocab):
@@ -51,7 +51,8 @@ class PositionalEncoding(nn.Module):
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         # 计算用于控制正余弦的系数，确保不同频率成分在d_model维空间内均匀分布
         div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+            torch.arange(0, d_model, 2).float() *
+            (-math.log(10000.0) / d_model)
         )
         # 根据位置和div_term计算正弦和余弦值，分别赋值给pe的偶数列和奇数列
         pe[:, 0::2] = torch.sin(
@@ -136,10 +137,12 @@ class MultiHeadedAttention(nn.Module):
         ]
 
         # 2) Apply attention on all the projected vectors in batch.
-        x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout)
+        x, self.attn = attention(
+            query, key, value, mask=mask, dropout=self.dropout)
 
         # 3) "Concat" using a view and apply a final linear.
-        x = x.transpose(1, 2).contiguous().view(nbatches, -1, self.h * self.d_k)
+        x = x.transpose(1, 2).contiguous().view(
+            nbatches, -1, self.h * self.d_k)
         del query
         del key
         del value
@@ -162,7 +165,8 @@ def len_mask2(batch_mask, len_q) -> torch.Tensor:
 def subsequent_mask(size):
     "Mask out subsequent positions."
     attn_shape = (1, size, size)
-    subsequent_mask = torch.triu(torch.ones(attn_shape), diagonal=1).type(torch.uint8)
+    subsequent_mask = torch.triu(torch.ones(
+        attn_shape), diagonal=1).type(torch.uint8)
     return subsequent_mask == 1
 
 
@@ -280,27 +284,34 @@ class Transformer(nn.Module):
     """
 
     def __init__(
-        self, src_vocab, tgt_vocab, N=6, d_model=512, d_ff=2048, h=8, dropout=0.1
+        self, src_vocab, tgt_vocab, N=6, d_model=512, d_ff=2048, h=8,
+        dropout=0.1, device=None
     ):
         super(Transformer, self).__init__()
         c = copy.deepcopy
         attn = MultiHeadedAttention(h, d_model)
         ff = PositionwiseFeedForward(d_model, d_ff, dropout)
         position = PositionalEncoding(d_model, dropout)
-        self.encoder = Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N)
+        self.encoder = Encoder(EncoderLayer(
+            d_model, c(attn), c(ff), dropout), N)
         self.decoder = Decoder(
             DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout), N
         )
-        self.src_embed = nn.Sequential(Embeddings(d_model, src_vocab), c(position))
-        self.tgt_embed = nn.Sequential(Embeddings(d_model, tgt_vocab), c(position))
+        self.src_embed = nn.Sequential(
+            Embeddings(d_model, src_vocab), c(position))
+        self.tgt_embed = nn.Sequential(
+            Embeddings(d_model, tgt_vocab), c(position))
         self.generator = Generator(d_model, tgt_vocab)
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
+        if device is not None:
+            self = self.to(device)
 
-    def forward(self, src, tgt, src_mask, tgt_mask):
+    def forward(self, src, tgt, src_mask=None, tgt_mask=None):
         "Take in and process masked src and target sequences."
-        return self.decode(self.encode(src, src_mask), src_mask, tgt, tgt_mask)
+        out = self.decode(self.encode(src, src_mask), src_mask, tgt, tgt_mask)
+        return self.generator(out)
 
     def encode(self, src, src_mask):
         return self.encoder(self.src_embed(src), src_mask)
@@ -321,7 +332,8 @@ def inference_test():
     ys = torch.zeros(1, 1).type_as(src)
 
     for i in range(9):
-        out = test_model.decode(memory, src_mask, ys, subsequent_mask(ys.size(1)))
+        out = test_model.decode(memory, src_mask, ys,
+                                subsequent_mask(ys.size(1)))
         prob = test_model.generator(out[:, -1])
         _, next_word = torch.max(prob, dim=1)
         next_word = next_word.data[0]

@@ -1,13 +1,19 @@
 import torch.optim as optim
 import pandas as pd
 import torch
+import time
+import os
 from torchtext.vocab import Vocab
 from torch.nn.utils.rnn import pad_sequence
 from collections import Counter
 from torch.utils.data import DataLoader, TensorDataset
-from transformer import *
-
+from torch import nn
+from transformer import len_mask2, subsequent_mask, Transformer
+from log import My_logger
+path = os.path.dirname(__file__)
 # Vocab 用法见 http://man.hubwiz.com/docset/torchtext.docset/Contents/Resources/Documents/vocab.html#build-vocab-from-iterator
+
+
 def build_vocab(path, vocab_path):
     special_symbols = [
         "<unk",
@@ -20,8 +26,9 @@ def build_vocab(path, vocab_path):
         "<S1>",
         "<S2>",
     ]
-    special_symbols += ["dis", "sym", "pro", "equ", "dru", "ite", "bod", "dep", "mic"]
-    with open(path) as r:
+    special_symbols += ["dis", "sym", "pro",
+                        "equ", "dru", "ite", "bod", "dep", "mic"]
+    with open(path, encoding="utf-8") as r:
         text = r.read()
     text = list(text)
     vocab = Vocab(Counter(text), specials=special_symbols)
@@ -57,23 +64,43 @@ def build_label(lis: list, vocab: Vocab):
     return torch.tensor(res + [vocab.stoi["<EOS>"]])
 
 
-def train(model, train_loader, criterion, optimizer, epochs=5):
+def train(model, train_loader, criterion, optimizer, epochs=5,
+          device=None, model_file="model.pt", logger=My_logger()):
     for epoch in range(epochs):
+        n = 0
+        start = time.time()
+        total = 0
         for batch, batch_mask, label, label_mask, target in train_loader:
+            if device is not None:
+                torch.cuda.empty_cache()
+                batch = batch.to(device)
+                label = label.to(device)
+                batch_mask = batch_mask.to(device)
+                label_mask = label_mask.to(device)
+                target = target.to(device)
             # 清空梯度
             optimizer.zero_grad()
             # 前向传播
             outputs = model(batch, label, batch_mask, label_mask)
             # 计算损失
-            loss = criterion(outputs, target)
+            loss = criterion(outputs.transpose(1, -1), target)
             # 反向传播
             loss.backward()
             # 更新参数
             optimizer.step()
+            if n == 0:
+                logger.info(g_gpu_memory())
+            n += 1
+            localtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            print(f"batch {n}, Loss: {loss.item():.4f}, {localtime}")
+            total += loss.item()
+        end = time.time()
+        logger.info(f'Epoch [{epoch+1}/{epochs}], Loss: {(total/n):.4f}, spend: {end-start}s')
+        torch.save(model.state_dict(), model_file)
+    return model
 
-        print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
 
-def pre_data(train_file, batch_size=1, save_path=None):
+def pre_data(train_file, save_path=None):
     df = pd.read_json(train_file)
     batch, batch_mask, label, label_mask, target = build_batch(df, vocab)
     batch_mask = batch_mask.unsqueeze(-2)
@@ -81,25 +108,92 @@ def pre_data(train_file, batch_size=1, save_path=None):
     sub_mask = subsequent_mask(label_mask.size(-1))
     label_mask = label_mask.masked_fill(sub_mask, True)
     dataset = TensorDataset(batch, batch_mask, label, label_mask, target)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     if save_path is not None:
-        torch.save(dataloader, save_path)
-    return dataloader
-    
-    
-
-train_file = "/work/CMeEE-V2/CMeEE-V2_train.json"
-vocab_path = "/work/CMeEE-V2/vocab.pt"
-train_loader_file = "/work/mnt/train_loader.pt"
-# vocab = build_vocab(train_file, vocab_path)
-vocab=torch.load(vocab_path, weights_only=False)
-vocab_dim = len(vocab)
-# train_loader = pre_data(train_file, batch_size=1, save_path=train_loader_file)
-train_loader=torch.load(train_loader_file, weights_only=False)
-model = Transformer(src_vocab=vocab_dim, tgt_vocab=vocab_dim, N=2, 
-                        d_model=512, d_ff=2048, h=8, dropout=0.1)
-criterion = nn.CrossEntropyLoss(ignore_index=vocab.stoi["<pad>"])
-optimizer = optim.SGD(model.parameters(), lr=0.01)
-train(model, train_loader, criterion, optimizer, epochs=5)
+        torch.save(dataset, save_path)
+    return dataset
 
 
+def gpu_memory(device):
+    props = torch.cuda.get_device_properties(device)
+    return props.total_memory
+
+
+def list_gpu_memory():
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            print(f"GPU{i}显存为: {gpu_memory(i) / (1024 ** 3):.2f} GB")
+    else:
+        print("没有找到GPU！")
+
+
+def g_gpu_memory(device=0):
+    gpu_memory_allocated = torch.cuda.memory_allocated(device) / (1024 ** 3)
+    all = (gpu_memory(device) - gpu_memory_allocated) / (1024 ** 3)
+    text = f"显存占用: {gpu_memory_allocated:.2f}/{all:.2f} GB"
+    return text
+
+
+def inference(text, model, vocab: Vocab, stop=1000):
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    input = torch.tensor([vocab.stoi[v] for v in text]).unsqueeze(0).to(device)
+    tgt = torch.tensor(vocab.stoi["<SOS>"]).unsqueeze(
+        0).unsqueeze(0).to(device)
+    model = model.to(device)
+    while stop:
+        stop -= 1
+        prob = model(input, tgt, None, None)
+        _, next_word = torch.max(prob[:, -1], dim=1)
+        next_word = next_word.data[0]
+        if vocab.stoi["<EOS>"] == next_word:
+            break
+        tgt = torch.cat(
+            [tgt, torch.empty(1, 1).type_as(input.data).fill_(next_word)],
+            dim=1
+        )
+    out = "".join([vocab.itos[v] for v in tgt[0, :]])
+    return out
+
+
+if __name__ == "__main__":
+    # 参数设置
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    train_file = os.path.join(path, "CMeEE-V2_train.json")
+    vocab_path = os.path.join(path, "vocab.pt")
+    dataset_file = os.path.join(path, "train_loader.pt")
+    model_file = os.path.join(path, "model_params.pt")
+    batch_size = 10  # batch_size越大，平均单个样本所需的训练时间越大。
+    load_vocab = True
+    load_data = True
+    load_model = True
+    logger = My_logger(level=20)
+    logger.add_handler("file", level=20, file="log.txt")
+    # 预处理
+    mark = time.time()
+    if load_vocab:
+        vocab = torch.load(vocab_path, weights_only=False)
+        logger.info(f"载入词表花费 {time.time()-mark:.3f} s")
+    else:
+        vocab = build_vocab(train_file, vocab_path)
+        logger.info(f"创建词表花费 {time.time()-mark:.3f} s")
+    vocab_dim = len(vocab)
+    mark = time.time()
+    if load_data:
+        dataset = torch.load(dataset_file, weights_only=False)
+        logger.info(f"载入数据集花费 {time.time()-mark:.3f} s")
+    else:
+        dataset = pre_data(train_file, save_path=dataset_file)
+        logger.info(f"创建数据集花费 {time.time()-mark:.3f} s")
+    mark = time.time()
+    model = Transformer(src_vocab=vocab_dim, tgt_vocab=vocab_dim, N=2,
+                        d_model=128, d_ff=512, h=4, dropout=0.1, device=device)
+    if load_model:
+        model.load_state_dict(torch.load(model_file))
+        logger.info(f"载入模型花费 {time.time()-mark:.3f} s")
+    else:
+        logger.info(f"创建模型花费 {time.time()-mark:.3f} s")
+    logger.info(g_gpu_memory())
+    criterion = nn.CrossEntropyLoss(ignore_index=vocab.stoi["<pad>"]).to(device)
+    optimizer = optim.SGD(model.parameters(), lr=0.01)
+    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    model = train(model, train_loader, criterion, optimizer, epochs=5,
+                  device=device, model_file=model_file, logger=logger)
