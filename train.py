@@ -8,6 +8,7 @@ from torch.nn.utils.rnn import pad_sequence
 from collections import Counter
 from torch.utils.data import DataLoader, TensorDataset
 from torch import nn
+from tensorboardX import SummaryWriter
 from transformer import len_mask2, subsequent_mask, Transformer
 from log import My_logger
 path = os.path.dirname(__file__)
@@ -65,7 +66,9 @@ def build_label(lis: list, vocab: Vocab):
 
 
 def train(model, train_loader, criterion, optimizer, epochs=5,
-          device=None, model_file="model.pt", logger=My_logger()):
+          device=None, model_file="model.pt", logger=My_logger(),
+          writer=SummaryWriter()):
+    global_step = 0
     for epoch in range(epochs):
         n = 0
         start = time.time()
@@ -89,13 +92,19 @@ def train(model, train_loader, criterion, optimizer, epochs=5,
             # 更新参数
             optimizer.step()
             if n == 0:
-                logger.info(g_gpu_memory())
+                text = g_gpu_memory() + f", Epoch [{epoch+1}/{epochs}]"
+                writer.add_text("test", text)
+                logger.info(text)
             n += 1
             localtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             print(f"batch {n}, Loss: {loss.item():.4f}, {localtime}")
+            writer.add_scalar("loss", loss.item(), global_step+n)
+            writer.add_scalar('Average batch spend', (time.time()-start)/n, global_step+n)
             total += loss.item()
+        global_step += n
         end = time.time()
         logger.info(f'Epoch [{epoch+1}/{epochs}], Loss: {(total/n):.4f}, spend: {end-start}s')
+        writer.add_scalar('Average Loss', total/n, epoch)
         torch.save(model.state_dict(), model_file)
     return model
 
@@ -161,39 +170,53 @@ if __name__ == "__main__":
     vocab_path = os.path.join(path, "vocab.pt")
     dataset_file = os.path.join(path, "train_loader.pt")
     model_file = os.path.join(path, "model_params.pt")
-    batch_size = 10  # batch_size越大，平均单个样本所需的训练时间越大。
+    batch_size = 5  # batch_size越大，平均单个样本所需的训练时间越大。
     load_vocab = True
     load_data = True
     load_model = True
     logger = My_logger(level=20)
     logger.add_handler("file", level=20, file="log.txt")
+    writer = SummaryWriter('./runs/train')
     # 预处理
     mark = time.time()
     if load_vocab:
         vocab = torch.load(vocab_path, weights_only=False)
-        logger.info(f"载入词表花费 {time.time()-mark:.3f} s")
+        text = f"载入词表花费 {time.time()-mark:.3f} s"
+        writer.add_text('初始化', text)
+        logger.info(text)
     else:
         vocab = build_vocab(train_file, vocab_path)
-        logger.info(f"创建词表花费 {time.time()-mark:.3f} s")
+        text = f"创建词表花费 {time.time()-mark:.3f} s"
+        writer.add_text('初始化', text)
+        logger.info(text)
     vocab_dim = len(vocab)
     mark = time.time()
     if load_data:
         dataset = torch.load(dataset_file, weights_only=False)
-        logger.info(f"载入数据集花费 {time.time()-mark:.3f} s")
+        text = f"载入数据集花费 {time.time()-mark:.3f} s"
+        writer.add_text('初始化', text)
+        logger.info(text)
     else:
         dataset = pre_data(train_file, save_path=dataset_file)
-        logger.info(f"创建数据集花费 {time.time()-mark:.3f} s")
+        text = f"创建数据集花费 {time.time()-mark:.3f} s"
+        writer.add_text('初始化', text)
+        logger.info(text)
     mark = time.time()
     model = Transformer(src_vocab=vocab_dim, tgt_vocab=vocab_dim, N=2,
                         d_model=128, d_ff=512, h=4, dropout=0.1, device=device)
     if load_model:
         model.load_state_dict(torch.load(model_file))
-        logger.info(f"载入模型花费 {time.time()-mark:.3f} s")
+        text = f"载入模型花费 {time.time()-mark:.3f} s"
+        writer.add_text('初始化', text)
+        logger.info(text)
     else:
-        logger.info(f"创建模型花费 {time.time()-mark:.3f} s")
+        text = f"创建模型花费 {time.time()-mark:.3f} s"
+        writer.add_text('初始化', text)
+        logger.info(text)
     logger.info(g_gpu_memory())
     criterion = nn.CrossEntropyLoss(ignore_index=vocab.stoi["<pad>"]).to(device)
     optimizer = optim.SGD(model.parameters(), lr=0.01)
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    # 训练
     model = train(model, train_loader, criterion, optimizer, epochs=5,
-                  device=device, model_file=model_file, logger=logger)
+                  device=device, model_file=model_file, logger=logger, writer=writer)
